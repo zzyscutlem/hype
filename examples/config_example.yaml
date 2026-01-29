@@ -1,0 +1,91 @@
+# Example Configuration for HyPE Agent System Training
+# This file demonstrates all available configuration options
+
+# Model configuration
+model:
+  # Base model to use (Qwen or Llama)
+  base_model_name: "Qwen/Qwen2.5-3B-Instruct"
+  
+  # Device configuration
+  device: "cuda"  # Options: cuda, cpu, mps
+  
+  # Generation parameters
+  max_length: 2048
+  temperature: 0.7
+  top_p: 0.9
+  
+  # Value Model architecture
+  value_head_hidden_dim: 4096
+  
+  # LoRA configuration for Executor Model
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules:
+    - "q_proj"
+    - "v_proj"
+  
+  # Training hyperparameters
+  learning_rate: 0.00001  # 1e-5
+  batch_size: 32
+  num_epochs: 3
+  warmup_steps: 100
+
+# Principle Memory configuration
+principle_memory:
+  # Milvus vector database connection
+  milvus_host: "localhost"
+  milvus_port: 19530
+  collection_name: "principles"
+  
+  # Embedding model for semantic search
+  embedding_model: "BAAI/bge-large-en-v1.5"
+  embedding_dim: 1024
+  
+  # Retrieval parameters
+  top_k: 5  # Number of principles to retrieve
+  semantic_weight: 0.7  # α in retrieval formula (0.0-1.0)
+  
+  # Deduplication thresholds
+  duplicate_threshold: 0.85  # Cosine similarity threshold for duplicates
+  merge_threshold: 0.75  # Threshold for merging similar principles
+  
+  # Pruning parameters
+  min_credit_score: 0.1  # Minimum credit score to keep principle
+  min_application_count: 3  # Minimum applications before pruning
+  max_principles: 100000  # Maximum number of principles to store
+
+# H-MCTS planner configuration
+hmcts:
+  search_budget: 100  # Number of MCTS iterations
+  exploration_constant: 1.414  # c in UCB formula (sqrt(2) recommended)
+  max_depth: 10  # Maximum tree depth
+  num_hypotheses_per_node: 3  # Number of hypotheses to generate per node
+
+# SR-Adapt validator configuration
+sr_adapt:
+  alignment_threshold: 0.6  # Minimum alignment score (0.0-1.0)
+  correction_steps: 5  # Number of LoRA fine-tuning steps
+  correction_learning_rate: 0.0001  # Learning rate for correction
+  max_correction_attempts: 3  # Maximum correction attempts per action
+
+# DPVD learner configuration
+dpvd:
+  principle_weight: 0.1  # β in dense reward formula
+  discount_factor: 0.99  # Discount factor for future rewards
+  replay_buffer_size: 10000  # Maximum trajectories in replay buffer
+  training_trigger_threshold: 1000  # Trigger training at this buffer size
+  value_training_epochs: 3  # Epochs for Value Model training
+
+# DPO trainer configuration
+dpo:
+  beta: 0.1  # KL penalty coefficient
+  learning_rate: 0.00001  # Learning rate for policy training
+  batch_size: 16  # Batch size for DPO training
+  num_epochs: 3  # Epochs for Policy Model training
+
+# General system settings
+seed: 42  # Random seed for reproducibility
+log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+checkpoint_dir: "./checkpoints"  # Directory for model checkpoints
+log_dir: "./logs"  # Directory for log files
