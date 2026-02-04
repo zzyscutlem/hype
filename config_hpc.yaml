@@ -1,0 +1,100 @@
+# HyPE System Configuration for HPC Environment
+
+# Model configuration
+model:
+  base_model_name: "Qwen/Qwen2.5-3B-Instruct"
+  device: "cuda"  # Use GPU on HPC
+  max_length: 2048
+  temperature: 0.7
+  top_p: 0.9
+  
+  # Value Model
+  value_head_hidden_dim: 4096
+  
+  # LoRA configuration
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules:
+    - "q_proj"
+    - "v_proj"
+  
+  # Training
+  learning_rate: 0.00001
+  batch_size: 1  # 降到 1 以避免 CUDA OOM（临时方案）
+  num_epochs: 3
+  warmup_steps: 100
+
+# Principle Memory configuration (Milvus Lite for HPC)
+principle_memory:
+  # Use Milvus Lite (embedded mode) - no separate server needed
+  milvus_host: "localhost"
+  milvus_port: 19530
+  use_milvus_lite: true  # Enable embedded Milvus
+  milvus_lite_path: "./data/milvus_lite.db"  # Local database file
+  collection_name: "principles"
+  embedding_model: "BAAI/bge-large-en-v1.5"
+  embedding_dim: 1024
+  
+  # Retrieval
+  top_k: 5
+  semantic_weight: 0.7
+  
+  # Deduplication
+  duplicate_threshold: 0.85
+  merge_threshold: 0.75
+  
+  # Pruning
+  min_credit_score: 0.1
+  min_application_count: 3
+  max_principles: 100000
+
+# H-MCTS configuration (optimized for HPC)
+hmcts:
+  search_budget: 30  # Balanced for GPU performance
+  exploration_constant: 1.414
+  max_depth: 5
+  num_hypotheses_per_node: 2
+  early_stop_threshold: 0.7
+  min_iterations: 5
+  value_cache_size: 100
+
+# SR-Adapt configuration
+sr_adapt:
+  alignment_threshold: 0.6
+  correction_steps: 5
+  correction_learning_rate: 0.0001
+  max_correction_attempts: 3
+
+# DPVD configuration
+dpvd:
+  principle_weight: 0.1
+  discount_factor: 0.99
+  replay_buffer_size: 10000
+  training_trigger_threshold: 1000
+  value_training_epochs: 3
+  # Note: batch_size is in model config, not dpvd config
+
+# DPO configuration
+dpo:
+  beta: 0.1
+  learning_rate: 0.00001
+  batch_size: 1  # Reduced from 2 to avoid CUDA OOM
+  num_epochs: 3
+
+# Principle Extraction configuration
+principle_extractor:
+  success_threshold: 0.5
+  min_trajectory_length: 1  # 允许从单步轨迹提取 principle
+
+# General settings
+seed: 42
+log_level: "INFO"
+checkpoint_dir: "./checkpoints"
+log_dir: "./logs"
+
+# HPC-specific settings
+hpc:
+  use_slurm: false  # Set to true if submitting as SLURM job
+  num_workers: 4    # Number of data loading workers
+  pin_memory: true  # Pin memory for faster GPU transfer

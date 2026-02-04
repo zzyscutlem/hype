@@ -69,7 +69,7 @@ class PrincipleMemory:
         Connect to Milvus and initialize the collection.
         
         This method:
-        1. Establishes connection to Milvus server
+        1. Establishes connection to Milvus server or Milvus Lite
         2. Loads the BGE-large-en embedding model
         3. Creates or loads the principles collection
         """
@@ -78,36 +78,81 @@ class PrincipleMemory:
             return
         
         try:
-            # Connect to Milvus
-            logger.info(f"Connecting to Milvus at {self.config.milvus_host}:{self.config.milvus_port}")
-            connections.connect(
-                alias="default",
-                host=self.config.milvus_host,
-                port=self.config.milvus_port
-            )
+            # Check if using Milvus Lite (embedded mode)
+            use_milvus_lite = getattr(self.config, 'use_milvus_lite', False)
+            
+            if use_milvus_lite:
+                # Use Milvus Lite (embedded mode)
+                milvus_lite_path = getattr(self.config, 'milvus_lite_path', './data/milvus_lite.db')
+                logger.info(f"Connecting to Milvus Lite at {milvus_lite_path}")
+                
+                # Create directory if it doesn't exist
+                import os
+                os.makedirs(os.path.dirname(milvus_lite_path), exist_ok=True)
+                
+                # Connect to Milvus Lite
+                connections.connect(
+                    alias="default",
+                    uri=milvus_lite_path  # Use local file path for Milvus Lite
+                )
+                logger.info("✅ Connected to Milvus Lite (embedded mode)")
+            else:
+                # Connect to Milvus server
+                logger.info(f"Connecting to Milvus server at {self.config.milvus_host}:{self.config.milvus_port}")
+                connections.connect(
+                    alias="default",
+                    host=self.config.milvus_host,
+                    port=self.config.milvus_port
+                )
+                logger.info("✅ Connected to Milvus server")
             
             # Load embedding model
             logger.info(f"Loading embedding model: {self.config.embedding_model}")
             
-            # Try to load from local cache first (offline mode)
+            # Force use of local cache
             import os
+            from pathlib import Path
             
-            try:
-                # Use local_files_only=True to force offline mode
-                logger.info("Attempting to load model from local cache (offline mode)...")
-                self.embedding_model = SentenceTransformer(
-                    self.config.embedding_model,
-                    cache_folder=os.path.expanduser('~/.cache/huggingface/hub'),
-                    local_files_only=True  # Force offline mode
-                )
-                logger.info("✅ Successfully loaded embedding model from local cache")
-            except Exception as e:
-                logger.warning(f"Failed to load in offline mode: {e}")
-                logger.info("Trying online mode...")
-                # Try online mode as fallback
-                self.embedding_model = SentenceTransformer(
-                    self.config.embedding_model,
-                    cache_folder=os.path.expanduser('~/.cache/huggingface/hub')
+            model_name = self.config.embedding_model
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+            
+            # Convert model name to cache directory format
+            cache_model_name = "models--" + model_name.replace("/", "--")
+            model_cache_path = cache_dir / cache_model_name
+            
+            if model_cache_path.exists():
+                logger.info(f"Found local cache: {model_cache_path}")
+                
+                # Find the snapshot directory
+                snapshots_dir = model_cache_path / "snapshots"
+                if snapshots_dir.exists():
+                    snapshot_dirs = list(snapshots_dir.iterdir())
+                    if snapshot_dirs:
+                        snapshot_path = snapshot_dirs[0]
+                        logger.info(f"Using snapshot: {snapshot_path.name}")
+                        
+                        # Force offline mode
+                        os.environ['HF_HUB_OFFLINE'] = '1'
+                        os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                        
+                        try:
+                            # Load directly from snapshot path
+                            self.embedding_model = SentenceTransformer(str(snapshot_path))
+                            logger.info("✅ Successfully loaded embedding model from local cache")
+                        except Exception as e:
+                            logger.error(f"Failed to load from snapshot: {e}")
+                            raise RuntimeError(
+                                f"Cannot load embedding model from local cache. "
+                                f"Please ensure {model_cache_path} contains valid model files."
+                            )
+                    else:
+                        raise RuntimeError(f"No snapshots found in {snapshots_dir}")
+                else:
+                    raise RuntimeError(f"Snapshots directory not found: {snapshots_dir}")
+            else:
+                raise RuntimeError(
+                    f"Embedding model not found in local cache: {model_cache_path}\n"
+                    f"Please download the model first or check the cache path."
                 )
             
             # Create or load collection
@@ -176,14 +221,27 @@ class PrincipleMemory:
             schema=schema
         )
         
-        # Create HNSW index for efficient similarity search
-        index_params = {
-            "metric_type": "COSINE",  # Cosine similarity
-            "index_type": "HNSW",
-            "params": {"M": 16, "efConstruction": 200}
-        }
+        # Choose index type based on whether using Milvus Lite
+        use_milvus_lite = getattr(self.config, 'use_milvus_lite', False)
         
-        logger.info("Creating HNSW index on embedding field")
+        if use_milvus_lite:
+            # Milvus Lite only supports FLAT, IVF_FLAT, and AUTOINDEX
+            # Use AUTOINDEX for simplicity (automatically chooses best index)
+            index_params = {
+                "metric_type": "COSINE",
+                "index_type": "AUTOINDEX",
+                "params": {}
+            }
+            logger.info("Creating AUTOINDEX on embedding field (Milvus Lite mode)")
+        else:
+            # Use HNSW for better performance on full Milvus server
+            index_params = {
+                "metric_type": "COSINE",
+                "index_type": "HNSW",
+                "params": {"M": 16, "efConstruction": 200}
+            }
+            logger.info("Creating HNSW index on embedding field (Milvus server mode)")
+        
         self.collection.create_index(
             field_name="embedding",
             index_params=index_params
@@ -276,25 +334,33 @@ class PrincipleMemory:
         Returns:
             List of (principle_id, similarity_score) tuples for duplicates
         """
-        # Search for similar principles
-        search_params = {"metric_type": "COSINE", "params": {"ef": 100}}
+        # Skip search if collection is empty
+        if self.collection.num_entities == 0:
+            return []
         
-        results = self.collection.search(
-            data=[principle.embedding.tolist()],
-            anns_field="embedding",
-            param=search_params,
-            limit=5,  # Check top 5 most similar
-            output_fields=["id", "text"]
-        )
-        
-        duplicates = []
-        for hits in results:
-            for hit in hits:
-                similarity = hit.score
-                if similarity > self.config.duplicate_threshold:
-                    duplicates.append((hit.entity.get("id"), similarity))
-        
-        return duplicates
+        try:
+            # Search for similar principles
+            search_params = {"metric_type": "COSINE", "params": {"ef": 100}}
+            
+            results = self.collection.search(
+                data=[principle.embedding.tolist()],
+                anns_field="embedding",
+                param=search_params,
+                limit=5,  # Check top 5 most similar
+                output_fields=["id", "text"]
+            )
+            
+            duplicates = []
+            for hits in results:
+                for hit in hits:
+                    similarity = hit.score
+                    if similarity > self.config.duplicate_threshold:
+                        duplicates.append((hit.entity.get("id"), similarity))
+            
+            return duplicates
+        except Exception as e:
+            logger.warning(f"Failed to search for duplicates: {e}")
+            return []
     
     def _merge_with_duplicate(self, new_principle: Principle, duplicate_info: Tuple[str, float]):
         """

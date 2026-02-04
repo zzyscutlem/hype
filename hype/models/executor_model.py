@@ -5,6 +5,8 @@ This module implements the Executor Model which uses LoRA (Low-Rank Adaptation)
 for test-time fine-tuning to correct actions that don't align with principles.
 """
 
+import os
+import sys
 import torch
 from peft import LoraConfig, get_peft_model, PeftModel
 from typing import Optional, List
@@ -15,6 +17,14 @@ from ..core.data_models import Principle, Action
 from .base_model import BaseModelLoader
 from ..utils.error_handlers import ErrorHandler, ModelGenerationError
 
+# 🔥 禁用 bitsandbytes 量化
+os.environ['BITSANDBYTES_NOWELCOME'] = '1'
+os.environ['DISABLE_BITSANDBYTES'] = '1'
+
+# 🔥 阻止 bitsandbytes 被导入
+import importlib.util
+if importlib.util.find_spec('bitsandbytes') is not None:
+    sys.modules['bitsandbytes'] = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 

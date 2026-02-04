@@ -500,17 +500,21 @@ class DPOTrainer:
         
         # Create reference model if not provided
         if reference_model is None:
-            logger.info("Creating reference model as copy of policy model")
-            # In practice, would deep copy the model
-            # For now, we'll use the same model but freeze it
-            self.reference_model = policy_model
+            logger.info("Creating reference model as deep copy of policy model")
+            # 🔥 关键修复：创建深拷贝，而不是引用同一个对象
+            # 这样 reference model 和 policy model 是独立的
+            import copy
+            self.reference_model = copy.deepcopy(policy_model)
+            logger.info("Reference model created successfully")
         else:
             self.reference_model = reference_model
         
         # Freeze reference model
         try:
+            self.reference_model.eval_mode()
             for param in self.reference_model.get_parameters():
                 param.requires_grad = False
+            logger.info("Reference model frozen successfully")
         except (TypeError, AttributeError):
             # Handle mock objects or models without get_parameters
             logger.warning("Could not freeze reference model parameters")

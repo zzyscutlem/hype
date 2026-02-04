@@ -79,7 +79,7 @@ class PrincipleExtractor:
             List of decision point dictionaries with metadata
         """
         if len(trajectory.steps) < self.min_trajectory_length:
-            logger.debug(
+            logger.info(
                 f"Trajectory {trajectory.id} too short ({len(trajectory.steps)} steps), "
                 f"minimum is {self.min_trajectory_length}"
             )
@@ -126,8 +126,9 @@ class PrincipleExtractor:
                 }
                 decision_points.append(decision_point)
         
-        logger.debug(
-            f"Identified {len(decision_points)} key decision points in trajectory {trajectory.id}"
+        logger.info(
+            f"Identified {len(decision_points)} key decision points in trajectory {trajectory.id} "
+            f"(steps={len(trajectory.steps)})"
         )
         
         return decision_points
@@ -159,8 +160,15 @@ class PrincipleExtractor:
         decision_points = self.analyze_trajectory(trajectory)
         
         if not decision_points:
-            logger.debug(f"No key decision points found in trajectory {trajectory.id}")
+            logger.warning(
+                f"No key decision points found in trajectory {trajectory.id} "
+                f"(steps={len(trajectory.steps)}, min_length={self.min_trajectory_length})"
+            )
             return []
+        
+        logger.info(
+            f"Found {len(decision_points)} key decision points in trajectory {trajectory.id}"
+        )
         
         # Generate principles from decision points
         principles = []
@@ -232,6 +240,8 @@ class PrincipleExtractor:
             reasons=decision_point['reasons']
         )
         
+        logger.debug(f"Generating principle with prompt length: {len(prompt)}")
+        
         # Generate principle using base model
         try:
             generated_texts = self.base_loader.generate(
@@ -248,14 +258,14 @@ class PrincipleExtractor:
                 # Clean up the generated text
                 principle_text = self._clean_principle_text(principle_text)
                 
-                logger.debug(f"Generated principle: {principle_text[:100]}...")
+                logger.info(f"Generated principle: {principle_text[:100]}...")
                 return principle_text
             else:
                 logger.warning("Model generated empty principle")
                 return ""
                 
         except Exception as e:
-            logger.error(f"Failed to generate principle: {e}")
+            logger.error(f"Failed to generate principle: {e}", exc_info=True)
             return ""
     
     def _format_principle_generation_prompt(

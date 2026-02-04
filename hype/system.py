@@ -76,10 +76,10 @@ class HyPESystem:
         # Offline evolution parameters
         replay_buffer_size: int = 10000,
         training_trigger_threshold: int = 100,
-        min_trajectories_for_training: int = 10,
+        min_trajectories_for_training: int = 3,  # 🔥 从 10 改为 3，允许更早触发训练
         dpvd_beta: float = 0.1,
         dpvd_learning_rate: float = 1e-5,
-        dpvd_batch_size: int = 32,
+        dpvd_batch_size: int = 1,  # 🔥 从 32 改为 1 以避免 CUDA OOM
         dpvd_epochs: int = 3,
         dpo_beta: float = 0.1,
         dpo_learning_rate: float = 1e-6,
@@ -206,7 +206,7 @@ class HyPESystem:
             logger.info("Step 2/5: Loading Policy Model")
             print("\n🤖 Step 2/5: Loading Policy Model", flush=True)
             print("   ⏳ Initializing Policy Model...", flush=True)
-            self.policy_model = PolicyModel(self.config.model)
+            self.policy_model = PolicyModel(self.config)
             self.policy_model.load_model()
             logger.info("Policy Model loaded")
             print("   ✅ Policy Model ready", flush=True)
@@ -215,7 +215,7 @@ class HyPESystem:
             logger.info("Step 3/5: Loading Value Model")
             print("\n💎 Step 3/5: Loading Value Model", flush=True)
             print("   ⏳ Initializing Value Model...", flush=True)
-            self.value_model = ValueModel(self.config.model)
+            self.value_model = ValueModel(self.config)
             self.value_model.load_model()
             logger.info("Value Model loaded")
             print("   ✅ Value Model ready", flush=True)
@@ -614,9 +614,6 @@ class HyPESystem:
         """
         Parse action description into Action object.
         
-        This is a simplified implementation. In practice, would need
-        more sophisticated parsing based on environment type.
-        
         Args:
             description: Action description from model
             environment_adapter: Environment adapter
@@ -624,32 +621,68 @@ class HyPESystem:
         Returns:
             Action object
         """
-        # Simple heuristic parsing - in practice, would use structured generation
-        # or more sophisticated parsing
+        # Determine environment type from adapter class name
+        adapter_class_name = environment_adapter.__class__.__name__
         
-        # Default action structure
+        # Set default action type based on environment
+        if "APIBank" in adapter_class_name:
+            default_type = "api_call"
+            default_params = {"api_name": "unknown", "method": "GET", "parameters": {}}
+        elif "ToolBench" in adapter_class_name:
+            default_type = "tool_use"
+            default_params = {"tool": "unknown", "args": {}}
+        elif "ALFWorld" in adapter_class_name:
+            default_type = "navigation"
+            default_params = {"command": description}
+        else:
+            default_type = "generic"
+            default_params = {}
+        
+        # Create action with environment-specific type
         action = Action(
-            type="generic",
-            parameters={},
+            type=default_type,
+            parameters=default_params.copy(),
             description=description
         )
         
-        # Try to extract action type and parameters from description
-        # This is environment-specific and simplified
+        # Try to extract more specific parameters from description
         description_lower = description.lower()
         
-        if "tool" in description_lower or "use" in description_lower:
-            action.type = "tool_use"
-            action.parameters = {"tool": "unknown", "args": {}}
-        elif "api" in description_lower or "call" in description_lower:
-            action.type = "api_call"
-            action.parameters = {"api": "unknown", "method": "GET", "params": {}}
-        elif "go" in description_lower or "move" in description_lower:
-            action.type = "navigation"
-            action.parameters = {"command": description}
-        elif "take" in description_lower or "put" in description_lower:
-            action.type = "interaction"
-            action.parameters = {"command": description}
+        if action.type == "api_call":
+            # Extract API method if mentioned
+            if "post" in description_lower or "create" in description_lower:
+                action.parameters["method"] = "POST"
+            elif "put" in description_lower or "update" in description_lower:
+                action.parameters["method"] = "PUT"
+            elif "delete" in description_lower or "remove" in description_lower:
+                action.parameters["method"] = "DELETE"
+            else:
+                action.parameters["method"] = "GET"
+            
+            # Try to extract API name
+            words = description.split()
+            for i, word in enumerate(words):
+                if word.lower() in ["api", "call", "request"] and i + 1 < len(words):
+                    action.parameters["api_name"] = words[i + 1].strip("()[]{}:,.")
+                    break
+        
+        elif action.type == "tool_use":
+            # Try to extract tool name
+            words = description.split()
+            for i, word in enumerate(words):
+                if word.lower() in ["tool", "use"] and i + 1 < len(words):
+                    action.parameters["tool"] = words[i + 1].strip("()[]{}:,.")
+                    break
+        
+        elif action.type in ["navigation", "interaction"]:
+            # For ALFWorld, use description as command
+            action.parameters["command"] = description
+            
+            # Refine type based on keywords
+            if any(kw in description_lower for kw in ["go", "move", "walk", "turn", "look"]):
+                action.type = "navigation"
+            elif any(kw in description_lower for kw in ["take", "put", "open", "close", "toggle", "use"]):
+                action.type = "interaction"
         
         return action
     
@@ -933,7 +966,8 @@ class HyPESystem:
         self.principle_extractor = PrincipleExtractor(
             base_loader=self.policy_model.base_loader,
             principle_memory=self.principle_memory,
-            success_threshold=self._principle_success_threshold
+            success_threshold=self._principle_success_threshold,
+            min_trajectory_length=1  # 允许从单步轨迹提取 principle
         )
         
         # Initialize DPVD
@@ -1232,6 +1266,42 @@ class HyPESystem:
             }
         
         logger.info(f"Evolution cycle with {len(trajectories)} trajectories")
+        
+        # 🔥 关键优化：训练前释放所有不必要的显存
+        import torch
+        if torch.cuda.is_available():
+            logger.info("🧹 Cleaning up GPU memory before training...")
+            print("\n🧹 Cleaning up GPU memory before training...", flush=True)
+            
+            # 1. 卸载 Executor Model（最大的显存占用）
+            if hasattr(self, 'sr_adapt') and hasattr(self.sr_adapt, 'executor_model'):
+                if self.sr_adapt.executor_model is not None:
+                    logger.info("   - Unloading Executor Model")
+                    print("   - Unloading Executor Model", flush=True)
+                    del self.sr_adapt.executor_model
+                    self.sr_adapt.executor_model = None
+            
+            # 2. 清理 HMCTS 的缓存
+            if hasattr(self, 'hmcts') and self.hmcts is not None:
+                if hasattr(self.hmcts, 'value_cache'):
+                    logger.info("   - Clearing HMCTS cache")
+                    print("   - Clearing HMCTS cache", flush=True)
+                    self.hmcts.value_cache.clear()
+            
+            # 3. 强制 Python 垃圾回收
+            import gc
+            gc.collect()
+            
+            # 4. 清空 CUDA 缓存
+            torch.cuda.empty_cache()
+            
+            # 5. 报告显存状态
+            allocated = torch.cuda.memory_allocated() / 1e9
+            reserved = torch.cuda.memory_reserved() / 1e9
+            free = (torch.cuda.get_device_properties(0).total_memory / 1e9) - allocated
+            
+            logger.info(f"   ✅ GPU memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {free:.2f}GB free")
+            print(f"   ✅ GPU memory: {allocated:.2f}GB allocated, {free:.2f}GB free", flush=True)
         
         results = {
             "status": "success",

@@ -164,6 +164,80 @@ class CheckpointManager:
             for checkpoint_path in to_delete:
                 Path(checkpoint_path).unlink()
                 logger.info(f"Deleted old checkpoint: {checkpoint_path}")
+    
+    def save_checkpoint(
+        self,
+        system: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+        checkpoint_name: Optional[str] = None
+    ) -> str:
+        """
+        Save complete system checkpoint including models and principle memory.
+        
+        Args:
+            system: HyPESystem instance
+            metadata: Optional metadata dictionary
+            checkpoint_name: Optional checkpoint name
+            
+        Returns:
+            Path to saved checkpoint
+        """
+        if checkpoint_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            checkpoint_name = f"checkpoint_{timestamp}.pt"
+        
+        checkpoint_path = self.checkpoint_dir / checkpoint_name
+        
+        # Collect system state
+        checkpoint = {
+            "timestamp": datetime.now().isoformat(),
+            "metadata": metadata or {}
+        }
+        
+        # Save models if available
+        if hasattr(system, 'policy_model') and system.policy_model is not None:
+            if hasattr(system.policy_model, 'base_loader') and system.policy_model.base_loader.model is not None:
+                checkpoint["policy_model_state"] = system.policy_model.base_loader.model.state_dict()
+        
+        if hasattr(system, 'value_model') and system.value_model is not None:
+            if hasattr(system.value_model, 'base_loader') and system.value_model.base_loader.model is not None:
+                checkpoint["value_model_state"] = system.value_model.base_loader.model.state_dict()
+        
+        # Save principle memory stats (principles are in Milvus Lite database)
+        if hasattr(system, 'principle_memory') and system.principle_memory is not None:
+            try:
+                stats = system.principle_memory.get_stats()
+                checkpoint["principle_memory_stats"] = stats
+                logger.info(f"Principle memory: {stats['num_principles']} principles")
+            except Exception as e:
+                logger.warning(f"Could not get principle memory stats: {e}")
+        
+        # Save trajectories if available
+        if hasattr(system, 'trajectories'):
+            checkpoint["num_trajectories"] = len(system.trajectories)
+        
+        # Save checkpoint
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Saved system checkpoint: {checkpoint_path}")
+        
+        # Also save a summary JSON for easy inspection
+        summary_path = checkpoint_path.with_suffix('.json')
+        summary = {
+            "checkpoint_name": checkpoint_name,
+            "timestamp": checkpoint["timestamp"],
+            "metadata": checkpoint["metadata"],
+            "principle_memory_stats": checkpoint.get("principle_memory_stats", {}),
+            "num_trajectories": checkpoint.get("num_trajectories", 0),
+            "has_policy_model": "policy_model_state" in checkpoint,
+            "has_value_model": "value_model_state" in checkpoint
+        }
+        
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        logger.info(f"Saved checkpoint summary: {summary_path}")
+        
+        return str(checkpoint_path)
 
 
 class PrincipleMemoryPersistence:

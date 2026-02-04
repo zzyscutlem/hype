@@ -102,6 +102,10 @@ class PrincipleMemoryConfig:
     embedding_model: str = "BAAI/bge-large-en-v1.5"
     embedding_dim: int = 1024
     
+    # Milvus Lite (embedded mode) configuration
+    use_milvus_lite: bool = False  # Use embedded Milvus instead of server
+    milvus_lite_path: str = "./data/milvus_lite.db"  # Local database file path
+    
     # Retrieval parameters
     top_k: int = 5
     semantic_weight: float = 0.7  # α in retrieval formula
@@ -124,11 +128,17 @@ class PrincipleMemoryConfig:
         """
         errors = []
         
-        if not self.milvus_host:
-            errors.append("milvus_host cannot be empty")
-        
-        if not 1 <= self.milvus_port <= 65535:
-            errors.append(f"milvus_port must be in [1, 65535], got {self.milvus_port}")
+        # Only validate server connection params if not using Milvus Lite
+        if not self.use_milvus_lite:
+            if not self.milvus_host:
+                errors.append("milvus_host cannot be empty when use_milvus_lite is False")
+            
+            if not 1 <= self.milvus_port <= 65535:
+                errors.append(f"milvus_port must be in [1, 65535], got {self.milvus_port}")
+        else:
+            # Validate Milvus Lite path
+            if not self.milvus_lite_path:
+                errors.append("milvus_lite_path cannot be empty when use_milvus_lite is True")
         
         if not self.collection_name:
             errors.append("collection_name cannot be empty")

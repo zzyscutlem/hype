@@ -6,6 +6,8 @@ This module provides utilities for loading and managing the base language model
 prompt formatting.
 """
 
+import os
+import sys
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import Optional, List, Dict, Any
@@ -14,6 +16,16 @@ from pathlib import Path
 
 from ..core.config import ModelConfig
 
+# 🔥 禁用 bitsandbytes 量化
+os.environ['BITSANDBYTES_NOWELCOME'] = '1'
+os.environ['DISABLE_BITSANDBYTES'] = '1'
+
+# 🔥 阻止 bitsandbytes 被导入
+# 这样 PEFT 和 transformers 会认为 bitsandbytes 不可用
+import importlib.util
+if importlib.util.find_spec('bitsandbytes') is not None:
+    # bitsandbytes 已安装，但我们要阻止它被使用
+    sys.modules['bitsandbytes'] = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +86,44 @@ class BaseModelLoader:
         logger.info(f"Loading model: {model_name}")
         print(f"   📦 Loading model: {model_name}", flush=True)
         
+        # 如果是 HuggingFace 模型名称，尝试从本地缓存加载
+        local_cache_path = None
+        if "/" in model_name and not Path(model_name).exists():
+            # 这是一个 HuggingFace 模型名称，检查本地缓存
+            cache_dir = Path.home() / ".cache/huggingface/hub"
+            model_cache_name = f"models--{model_name.replace('/', '--')}"
+            model_cache_dir = cache_dir / model_cache_name
+            
+            if model_cache_dir.exists():
+                # 找到缓存目录，查找 snapshots
+                snapshots_dir = model_cache_dir / "snapshots"
+                if snapshots_dir.exists():
+                    # 获取最新的快照
+                    snapshots = list(snapshots_dir.iterdir())
+                    if snapshots:
+                        local_cache_path = max(snapshots, key=lambda p: p.stat().st_mtime)
+                        logger.info(f"Found local cache: {local_cache_path}")
+                        print(f"   ✅ Using local cache: {local_cache_path.name}", flush=True)
+        
         try:
             # Load tokenizer
             print(f"   ⏳ Loading tokenizer...", flush=True)
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                padding_side="left"
-            )
+            
+            if local_cache_path:
+                # 从本地缓存加载（离线模式）
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    str(local_cache_path),
+                    trust_remote_code=True,
+                    padding_side="left",
+                    local_files_only=True
+                )
+            else:
+                # 正常加载（可能从网络下载）
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    padding_side="left"
+                )
             print(f"   ✅ Tokenizer loaded", flush=True)
             
             # Set pad token if not present
@@ -90,19 +132,39 @@ class BaseModelLoader:
             
             # Load model with float32 for training stability
             print(f"   ⏳ Loading model weights (this may take 1-2 minutes)...", flush=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.float32,  # Use float32 for better training stability
-                device_map="auto" if self.device.type == "cuda" else None,
-            )
+            
+            # 🔥 显式禁用量化配置
+            quantization_config = None
+            
+            if local_cache_path:
+                # 从本地缓存加载（离线模式）
+                # 🔥 不使用 device_map="auto"，避免触发 bitsandbytes
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    str(local_cache_path),
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                    local_files_only=True,
+                    quantization_config=quantization_config,
+                    load_in_8bit=False,
+                    load_in_4bit=False
+                )
+            else:
+                # 正常加载（可能从网络下载）
+                # 🔥 不使用 device_map="auto"，避免触发 bitsandbytes
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                    quantization_config=quantization_config,
+                    load_in_8bit=False,
+                    load_in_4bit=False
+                )
             print(f"   ✅ Model weights loaded", flush=True)
             
-            # Move to device if not using device_map
-            if self.device.type != "cuda":
-                print(f"   ⏳ Moving model to {self.device}...", flush=True)
-                self.model = self.model.to(self.device)
-                print(f"   ✅ Model moved to device", flush=True)
+            # 手动移动到设备
+            print(f"   ⏳ Moving model to {self.device}...", flush=True)
+            self.model = self.model.to(self.device)
+            print(f"   ✅ Model moved to device", flush=True)
             
             self.model.eval()
             

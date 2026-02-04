@@ -197,6 +197,7 @@ class PolicyModel:
         hypothesis: str,
         principles: Optional[List[Principle]] = None,
         action_format: Optional[Dict[str, Any]] = None,
+        environment_type: str = "general",
         temperature: Optional[float] = None
     ) -> Action:
         """
@@ -208,6 +209,7 @@ class PolicyModel:
             hypothesis: High-level hypothesis to instantiate
             principles: Optional list of relevant principles
             action_format: Optional format specification for the action
+            environment_type: Type of environment (toolbench, api_bank, alfworld)
             temperature: Sampling temperature
             
         Returns:
@@ -223,15 +225,15 @@ class PolicyModel:
         )
         
         # Parse action description into structured format
-        # This is a simplified version - in practice, would use more sophisticated parsing
-        action = self._parse_action_description(action_desc, action_format)
+        action = self._parse_action_description(action_desc, action_format, environment_type)
         
         return action
     
     def _parse_action_description(
         self,
         description: str,
-        action_format: Optional[Dict[str, Any]] = None
+        action_format: Optional[Dict[str, Any]] = None,
+        environment_type: str = "general"
     ) -> Action:
         """
         Parse action description into structured Action object.
@@ -239,27 +241,119 @@ class PolicyModel:
         Args:
             description: Natural language action description
             action_format: Optional format specification
+            environment_type: Type of environment (toolbench, api_bank, alfworld)
             
         Returns:
             Structured Action object
         """
-        # Simple parsing - extract action type and parameters
-        # In practice, this would be more sophisticated based on environment
+        # Determine action type based on environment
+        if environment_type == "api_bank":
+            action_type = "api_call"
+            # Try to extract API parameters from description
+            parameters = self._extract_api_bank_params(description)
+        elif environment_type == "toolbench":
+            action_type = "tool_use"
+            parameters = self._extract_toolbench_params(description)
+        elif environment_type == "alfworld":
+            action_type = "navigation"  # Default, could be "interaction"
+            parameters = self._extract_alfworld_params(description)
+        else:
+            action_type = "general"
+            parameters = {"description": description}
         
-        # Default action structure
-        action_type = "general"
-        parameters = {"description": description}
-        
-        # Try to extract structured information if format provided
+        # Override with format if provided
         if action_format:
-            # This would be environment-specific parsing logic
-            pass
+            if "type" in action_format:
+                action_type = action_format["type"]
+            if "parameters" in action_format:
+                parameters.update(action_format["parameters"])
         
         return Action(
             type=action_type,
             parameters=parameters,
             description=description
         )
+    
+    def _extract_api_bank_params(self, description: str) -> Dict[str, Any]:
+        """
+        Extract API-Bank parameters from action description.
+        
+        Args:
+            description: Action description
+            
+        Returns:
+            Dictionary with api_name, method, and parameters
+        """
+        # Default parameters
+        params = {
+            "api_name": "unknown_api",
+            "method": "GET",
+            "parameters": {}
+        }
+        
+        # Try to extract API name (simple heuristic)
+        desc_lower = description.lower()
+        if "api" in desc_lower or "request" in desc_lower:
+            # Look for common API patterns
+            if "get" in desc_lower or "fetch" in desc_lower or "retrieve" in desc_lower:
+                params["method"] = "GET"
+            elif "post" in desc_lower or "create" in desc_lower or "submit" in desc_lower:
+                params["method"] = "POST"
+            elif "put" in desc_lower or "update" in desc_lower:
+                params["method"] = "PUT"
+            elif "delete" in desc_lower or "remove" in desc_lower:
+                params["method"] = "DELETE"
+            
+            # Try to extract API name from description
+            # This is a simple heuristic - in practice would use more sophisticated parsing
+            words = description.split()
+            for i, word in enumerate(words):
+                if word.lower() in ["api", "call", "request"] and i + 1 < len(words):
+                    params["api_name"] = words[i + 1].strip("()[]{}:,.")
+                    break
+        
+        return params
+    
+    def _extract_toolbench_params(self, description: str) -> Dict[str, Any]:
+        """
+        Extract ToolBench parameters from action description.
+        
+        Args:
+            description: Action description
+            
+        Returns:
+            Dictionary with tool and args
+        """
+        params = {
+            "tool": "unknown_tool",
+            "args": {}
+        }
+        
+        # Try to extract tool name
+        desc_lower = description.lower()
+        if "tool" in desc_lower or "use" in desc_lower:
+            words = description.split()
+            for i, word in enumerate(words):
+                if word.lower() in ["tool", "use"] and i + 1 < len(words):
+                    params["tool"] = words[i + 1].strip("()[]{}:,.")
+                    break
+        
+        return params
+    
+    def _extract_alfworld_params(self, description: str) -> Dict[str, Any]:
+        """
+        Extract ALFWorld parameters from action description.
+        
+        Args:
+            description: Action description
+            
+        Returns:
+            Dictionary with command
+        """
+        # For ALFWorld, the description itself is the command
+        return {
+            "command": description
+        }
     
     def batch_generate_hypotheses(
         self,

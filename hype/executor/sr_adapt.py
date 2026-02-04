@@ -103,7 +103,7 @@ class SyntaxValidator:
         
         API-Bank actions must have:
         - type: "api_call"
-        - parameters: {"api": str, "method": str, "params": dict}
+        - parameters: {"api_name": str, "method": str, "parameters": dict}
         
         Args:
             action: Action to validate
@@ -116,23 +116,23 @@ class SyntaxValidator:
             return False, f"Invalid action type for API-Bank: {action.type}, expected 'api_call'"
         
         # Check required parameters
-        required_params = ["api", "method", "params"]
+        required_params = ["api_name", "method", "parameters"]
         for param in required_params:
             if param not in action.parameters:
                 return False, f"Missing required parameter: '{param}'"
         
         # Check parameter types
-        if not isinstance(action.parameters["api"], str):
-            return False, f"Parameter 'api' must be string, got {type(action.parameters['api'])}"
+        if not isinstance(action.parameters["api_name"], str):
+            return False, f"Parameter 'api_name' must be string, got {type(action.parameters['api_name'])}"
         
         if not isinstance(action.parameters["method"], str):
             return False, f"Parameter 'method' must be string, got {type(action.parameters['method'])}"
         
-        if not isinstance(action.parameters["params"], dict):
-            return False, f"Parameter 'params' must be dict, got {type(action.parameters['params'])}"
+        if not isinstance(action.parameters["parameters"], dict):
+            return False, f"Parameter 'parameters' must be dict, got {type(action.parameters['parameters'])}"
         
         # Check API name and method are not empty
-        if not action.parameters["api"].strip():
+        if not action.parameters["api_name"].strip():
             return False, "API name cannot be empty"
         
         if not action.parameters["method"].strip():
@@ -246,7 +246,58 @@ class SRAdapt:
         
         if self.embedding_model is None:
             logger.info(f"Loading embedding model: {self.memory_config.embedding_model}")
-            self.embedding_model = SentenceTransformer(self.memory_config.embedding_model)
+            
+            # Force use of local cache
+            import os
+            from pathlib import Path
+            
+            model_name = self.memory_config.embedding_model
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+            
+            # Convert model name to cache directory format
+            # e.g., "BAAI/bge-large-en-v1.5" -> "models--BAAI--bge-large-en-v1.5"
+            cache_model_name = "models--" + model_name.replace("/", "--")
+            model_cache_path = cache_dir / cache_model_name
+            
+            if model_cache_path.exists():
+                logger.info(f"Found local cache: {model_cache_path}")
+                
+                # Find the snapshot directory (contains actual model files)
+                snapshots_dir = model_cache_path / "snapshots"
+                if snapshots_dir.exists():
+                    # Get the first (and usually only) snapshot
+                    snapshot_dirs = list(snapshots_dir.iterdir())
+                    if snapshot_dirs:
+                        snapshot_path = snapshot_dirs[0]
+                        logger.info(f"Using snapshot: {snapshot_path.name}")
+                        
+                        # Force offline mode
+                        os.environ['HF_HUB_OFFLINE'] = '1'
+                        os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                        
+                        try:
+                            # Load directly from snapshot path
+                            self.embedding_model = SentenceTransformer(
+                                str(snapshot_path),
+                                device=self.config.device
+                            )
+                            logger.info(f"✅ Successfully loaded embedding model from local cache")
+                            return
+                        except Exception as e:
+                            logger.error(f"Failed to load from snapshot: {e}")
+                            raise RuntimeError(
+                                f"Cannot load embedding model from local cache. "
+                                f"Please ensure {model_cache_path} contains valid model files."
+                            )
+                    else:
+                        raise RuntimeError(f"No snapshots found in {snapshots_dir}")
+                else:
+                    raise RuntimeError(f"Snapshots directory not found: {snapshots_dir}")
+            else:
+                raise RuntimeError(
+                    f"Embedding model not found in local cache: {model_cache_path}\n"
+                    f"Please download the model first or check the cache path."
+                )
     
     def validate_syntax(
         self,

@@ -259,7 +259,15 @@ class ValueModel:
         if self.value_head is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
         
-        self.base_loader.get_model().train()
+        # 🔥 关键修复：base model 保持 eval 模式，不计算梯度
+        # 只有 value head 需要训练
+        self.base_loader.get_model().eval()
+        
+        # 确保 base model 参数不需要梯度
+        for param in self.base_loader.get_model().parameters():
+            param.requires_grad = False
+        
+        # 只有 value head 进入训练模式
         self.value_head.train()
     
     def eval_mode(self) -> None:
@@ -280,11 +288,10 @@ class ValueModel:
         if self.value_head is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
         
-        # Return both base model and value head parameters
-        base_params = self.base_loader.get_model().parameters()
-        value_params = self.value_head.parameters()
-        
-        return list(base_params) + list(value_params)
+        # 🔥 关键修复：只返回 value head 的参数，不训练 base model
+        # Base model 已经通过 LoRA 训练过了，这里只需要训练 value head
+        # 这样可以节省大量显存（不需要计算 base model 的梯度和优化器状态）
+        return list(self.value_head.parameters())
     
     def save_model(self, save_path: str) -> None:
         """

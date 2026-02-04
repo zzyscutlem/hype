@@ -296,6 +296,12 @@ Estimated Value:"""
             # Create batches
             n_batches = (len(train_prompts) + self.batch_size - 1) // self.batch_size
             
+            # 在每个 epoch 开始前清理显存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                allocated_before = torch.cuda.memory_allocated() / 1e9
+                logger.info(f"Epoch {epoch+1}: GPU memory before training: {allocated_before:.2f}GB")
+            
             for batch_idx in range(n_batches):
                 start_idx = batch_idx * self.batch_size
                 end_idx = min(start_idx + self.batch_size, len(train_prompts))
@@ -332,7 +338,7 @@ Estimated Value:"""
                     self._revert_checkpoint()
                     raise
                 
-                # Aggressive memory cleanup after each batch
+                # 每个 batch 后立即清理显存
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             
@@ -355,9 +361,11 @@ Estimated Value:"""
                     f"train_loss={avg_train_loss:.4f}"
                 )
             
-            # Cleanup after each epoch
+            # Epoch 结束后清理显存并报告
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                allocated_after = torch.cuda.memory_allocated() / 1e9
+                logger.info(f"Epoch {epoch+1}: GPU memory after epoch: {allocated_after:.2f}GB")
         
         # Set model back to eval mode
         self.value_model.eval_mode()
@@ -383,6 +391,9 @@ Estimated Value:"""
         Returns:
             Batch loss
         """
+        # Zero gradients first
+        optimizer.zero_grad(set_to_none=True)  # set_to_none=True 更节省显存
+        
         # Tokenize inputs
         tokenizer = self.value_model.base_loader.get_tokenizer()
         inputs = tokenizer(
@@ -413,19 +424,25 @@ Estimated Value:"""
         loss = nn.functional.mse_loss(predictions, target_tensor)
         
         # Backward pass
-        optimizer.zero_grad()
         loss.backward()
+        
+        # Gradient clipping to prevent explosion
+        torch.nn.utils.clip_grad_norm_(self.value_model.get_parameters(), max_norm=1.0)
+        
         optimizer.step()
         
         # Get loss value before cleanup
         loss_value = loss.item()
         
-        # Clean up tensors to prevent memory leak
+        # 立即清理所有中间张量
         del inputs
         del target_tensor
         del predictions
         del loss
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        # 强制清理显存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return loss_value
     
@@ -475,16 +492,19 @@ Estimated Value:"""
             
             # Compute MSE loss
             loss = nn.functional.mse_loss(predictions, target_tensor)
+            
+            # Get loss value immediately
+            loss_value = loss.item()
         
-        # Get loss value before cleanup
-        loss_value = loss.item()
-        
-        # Clean up tensors to prevent memory leak
+        # 立即清理所有张量
         del inputs
         del target_tensor
         del predictions
         del loss
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        # 强制清理显存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         self.value_model.train_mode()
         
@@ -495,14 +515,24 @@ Estimated Value:"""
         import copy
         logger.info("Saving training checkpoint")
         
-        # Save model state dict (deep copy to avoid reference issues)
-        base_model = self.value_model.get_base_model()
+        # 只保存 LoRA 参数和 value head，不保存整个 base model
+        # 这样可以大幅减少显存占用
         value_head = self.value_model.get_value_head()
         
+        # 只保存可训练的参数（LoRA + value head）
+        trainable_params = {}
+        base_model = self.value_model.get_base_model()
+        
+        for name, param in base_model.named_parameters():
+            if param.requires_grad:  # 只保存 LoRA 参数
+                trainable_params[f'base_model.{name}'] = param.data.clone()
+        
         self.checkpoint_state = {
-            'base_model': copy.deepcopy(base_model.state_dict()),
+            'trainable_params': trainable_params,
             'value_head': copy.deepcopy(value_head.state_dict())
         }
+        
+        logger.info(f"Checkpoint saved: {len(trainable_params)} trainable parameters")
     
     def _revert_checkpoint(self):
         """Revert model to saved checkpoint state."""
@@ -512,11 +542,15 @@ Estimated Value:"""
         
         logger.info("Reverting to previous checkpoint")
         
-        # Restore model state
+        # Restore trainable parameters
         base_model = self.value_model.get_base_model()
-        value_head = self.value_model.get_value_head()
+        for name, param in base_model.named_parameters():
+            full_name = f'base_model.{name}'
+            if full_name in self.checkpoint_state['trainable_params']:
+                param.data.copy_(self.checkpoint_state['trainable_params'][full_name])
         
-        base_model.load_state_dict(self.checkpoint_state['base_model'])
+        # Restore value head
+        value_head = self.value_model.get_value_head()
         value_head.load_state_dict(self.checkpoint_state['value_head'])
         
         logger.info("Checkpoint restored successfully")
